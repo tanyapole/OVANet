@@ -1,7 +1,6 @@
 from models.basenet import *
 import os
 import torch
-import neptune
 import socket
 
 

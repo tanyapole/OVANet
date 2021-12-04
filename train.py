@@ -13,6 +13,8 @@ from utils.lr_schedule import inv_lr_scheduler
 from utils.defaults import get_dataloaders, get_models
 from eval import test
 import argparse
+import wandb
+from pathlib import Path
 
 parser = argparse.ArgumentParser(description='Pytorch OVANet',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -46,11 +48,13 @@ parser.add_argument("--save_path", type=str,
 parser.add_argument('--multi', type=float,
                     default=0.1,
                     help='weight factor for adaptation')
+parser.add_argument('--steps', type=int, help='number of steps, overrides config train.min_step')
 args = parser.parse_args()
 
 config_file = args.config
 conf = yaml.load(open(config_file))
-save_config = yaml.load(open(config_file))
+if args.steps is not None:
+    conf['train']['min_step'] = args.steps
 conf = easydict.EasyDict(conf)
 gpu_devices = ','.join([str(id) for id in args.gpu_devices])
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
@@ -84,6 +88,18 @@ G, C1, C2, opt_g, opt_c, \
 param_lr_g, param_lr_c = get_models(inputs)
 ndata = target_folder.__len__()
 
+def _get_domain_name(filepath):
+    filepath = Path(filepath)
+    parts = filepath.name[:-len(filepath.suffix)].split('_')
+    assert len(parts) == 3, f"can't process filename {filepath}"
+    return parts[1]
+
+
+def _get_run_name(source, target):
+    source, target = _get_domain_name(source), _get_domain_name(target)
+    return f'{source} -> {target}'
+
+
 
 def train():
     criterion = nn.CrossEntropyLoss().cuda()
@@ -92,6 +108,9 @@ def train():
     data_iter_t = iter(target_loader)
     len_train_source = len(source_loader)
     len_train_target = len(target_loader)
+    run = wandb.init(project='original-OVANet', 
+                        name='original ' + _get_run_name(args.source_data, args.target_data), 
+                        config={'source': args.source_data, 'target': args.target_data})
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
@@ -155,6 +174,14 @@ def train():
         opt_c.zero_grad()
         if step % conf.train.log_interval == 0:
             print(log_string.format(*log_values))
+        run.log({
+            'step': step,
+            'loss/src': loss_s.item(),
+            'loss/open': loss_open.item(),
+            'loss/open_src_pos': open_loss_pos.item(),
+            'loss/open_src_neg': open_loss_neg.item(),
+            'loss/open_tgt': ent_open.item()
+        })
         if step > 0 and step % conf.test.test_interval == 0:
             acc_o, h_score = test(step, test_loader, logname, n_share, G,
                                   [C1, C2], open=open)
@@ -164,6 +191,12 @@ def train():
             if args.save_model:
                 save_path = "%s_%s.pth"%(args.save_path, step)
                 save_model(G, C1, C2, save_path)
+            run.log({
+                'step': step,
+                'acc': acc_o,
+                'h_score': h_score
+            })
+    run.finish()
 
 
 train()
