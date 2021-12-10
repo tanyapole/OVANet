@@ -6,6 +6,7 @@ import os
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
+from datetime import datetime as dt
 
 def _get_label(s:str): return int(s.strip().split()[1])
 def _get_labels(lines): return list(map(_get_label, lines))
@@ -22,17 +23,19 @@ def _make_split(source_path):
     with open(source_path, 'r') as f:
         lines = f.readlines()
     trn, val = train_test_split(lines, test_size=200, stratify=_get_labels(lines), random_state=0)
-    with open('tmp/trn.txt', 'w') as g: g.writelines(trn)
-    with open('tmp/val.txt', 'w') as g: g.writelines(val)
+    now = dt.now().strftime('%m%d_%H%M%S_%f')
+    source_path = f'tmp/trn_{now}.txt'
+    valid_path = f'tmp/val_{now}.txt'
+    with open(source_path, 'w') as g: g.writelines(trn)
+    with open(valid_path, 'w') as g: g.writelines(val)
     print('Split: ', len(trn), len(val))
+    return source_path, valid_path
 
 
 def get_loader(source_path, target_path, evaluation_path, transforms,
                batch_size=32, return_id=False, balanced=False, val=False, val_data=None):
 
-    _make_split(source_path)
-    source_path = 'tmp/trn.txt'
-    valid_path = 'tmp/val.txt'
+    source_path, valid_path = _make_split(source_path)
 
     source_folder = ImageFolder(os.path.join(source_path),
                                 transforms["src"],
