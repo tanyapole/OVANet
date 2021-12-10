@@ -22,14 +22,14 @@ def get_dataloaders(kwargs):
         val = False
 
     data_transforms = {
-        source_data: transforms.Compose([
+        "src": transforms.Compose([
             transforms.Scale((256, 256)),
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(224),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ]),
-        target_data: transforms.Compose([
+        "tgt": transforms.Compose([
             transforms.Scale((256, 256)),
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(224),

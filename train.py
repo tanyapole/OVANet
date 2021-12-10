@@ -1,4 +1,5 @@
 from __future__ import print_function
+import numpy as np
 import yaml
 import easydict
 import os
@@ -80,13 +81,15 @@ inputs["num_class"] = num_class
 inputs["config_file"] = config_file
 
 source_loader, target_loader, \
-test_loader, target_folder = get_dataloaders(inputs)
+test_loader, valid_loader, target_folder = get_dataloaders(inputs)
 
 logname = log_set(inputs)
 
 G, C1, C2, opt_g, opt_c, \
 param_lr_g, param_lr_c = get_models(inputs)
 ndata = target_folder.__len__()
+
+# os.environ["WANDB_MODE"] = "offline"
 
 def _get_domain_name(filepath):
     filepath = Path(filepath)
@@ -109,8 +112,9 @@ def train():
     len_train_source = len(source_loader)
     len_train_target = len(target_loader)
     run = wandb.init(project='original-OVANet', 
-                        name='original ' + _get_run_name(args.source_data, args.target_data), 
-                        config={'source': args.source_data, 'target': args.target_data})
+                        name='with valid ' + _get_run_name(args.source_data, args.target_data), 
+                        config={'source': args.source_data, 'target': args.target_data},
+                        tags=['valid'])
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
@@ -183,6 +187,7 @@ def train():
             'loss/open_tgt': ent_open.item()
         })
         if step > 0 and step % conf.test.test_interval == 0:
+            val_loss, val_acc = validate(step, valid_loader, list(range(num_class)), G, C1, criterion)
             acc_o, h_score = test(step, test_loader, logname, n_share, G,
                                   [C1, C2], open=open)
             print("acc all %s h_score %s " % (acc_o, h_score))
@@ -194,9 +199,35 @@ def train():
             run.log({
                 'step': step,
                 'acc': acc_o,
-                'h_score': h_score
+                'h_score': h_score,
+                'valid_loss': val_loss,
+                'valid_acc': val_acc
             })
     run.finish()
+
+def validate(step, valid_loader, src_classes, G, C1, criterion):
+    G.eval()
+    C1.eval()
+    losses, labels, preds = [], [], []
+    for batch in valid_loader:
+        img, label = batch[0].cuda(), batch[1].cuda()
+        with torch.no_grad():
+            out = C1(G(img))
+            loss = criterion(out, label)
+        losses.append(loss)
+        labels.append(label)
+        preds.append(out.argmax(dim=1))
+    loss = sum(losses) / len(losses)
+    labels = torch.cat(labels, dim=0)
+    preds = torch.cat(preds, dim=0)
+    accs = []
+    for c in src_classes:
+        idxs = labels == c
+        comparison = (labels[idxs] == preds[idxs])
+        acc = comparison.sum() / len(comparison)
+        accs.append(acc.item())
+    acc = np.mean(accs)
+    return loss.item(), acc
 
 
 train()
