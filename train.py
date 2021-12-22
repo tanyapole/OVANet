@@ -5,97 +5,27 @@ import os
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 from apex import amp, optimizers
 from utils.utils import log_set, save_model
 from utils.loss import ova_loss, open_entropy
 from utils.lr_schedule import inv_lr_scheduler
-from utils.defaults import get_dataloaders, get_models
+from utils.defaults import get_models, get_dataloaders
+from data_handling import api
 import numpy as np
 # from eval import test
 import argparse
 import wandb
 from pathlib import Path
 
-parser = argparse.ArgumentParser(description='Pytorch OVANet',
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--config', type=str, default='config.yaml',
-                    help='/path/to/config/file')
-
-parser.add_argument('--source_data', type=str,
-                    default='./utils/source_list.txt',
-                    help='path to source list')
-parser.add_argument('--target_data', type=str,
-                    default='./utils/target_list.txt',
-                    help='path to target list')
-parser.add_argument('--log-interval', type=int,
-                    default=100,
-                    help='how many batches before logging training status')
-parser.add_argument('--exp_name', type=str,
-                    default='office',
-                    help='/path/to/config/file')
-parser.add_argument('--network', type=str,
-                    default='resnet50',
-                    help='network name')
-parser.add_argument("--gpu_devices", type=int, nargs='+',
-                    default=None, help="")
-parser.add_argument("--no_adapt",
-                    default=False, action='store_true')
-parser.add_argument("--save_model",
-                    default=False, action='store_true')
-parser.add_argument("--save_path", type=str,
-                    default="record/ova_model",
-                    help='/path/to/save/model')
-parser.add_argument('--multi', type=float,
-                    default=0.1,
-                    help='weight factor for adaptation')
-parser.add_argument('--steps', type=int, help='number of steps, overrides config train.min_step')
-args = parser.parse_args()
-
-config_file = args.config
-conf = yaml.load(open(config_file))
-if args.steps is not None:
-    conf['train']['min_step'] = args.steps
-conf = easydict.EasyDict(conf)
-gpu_devices = ','.join([str(id) for id in args.gpu_devices])
-os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
-# os.environ["WANDB_MODE"] = "offline"
-args.cuda = torch.cuda.is_available()
-
-source_data = args.source_data
-target_data = args.target_data
-evaluation_data = args.target_data
-network = args.network
-use_gpu = torch.cuda.is_available()
-n_share = conf.data.dataset.n_share
-n_source_private = conf.data.dataset.n_source_private
-n_total = conf.data.dataset.n_total
-open = n_total - n_share - n_source_private > 0
-num_class = n_share + n_source_private
-script_name = os.path.basename(__file__)
-
-inputs = vars(args)
-inputs["evaluation_data"] = evaluation_data
-inputs["conf"] = conf
-inputs["script_name"] = script_name
-inputs["num_class"] = num_class
-inputs["config_file"] = config_file
-
-source_loader, target_loader, \
-test_loader, target_folder = get_dataloaders(inputs)
-
-logname = log_set(inputs)
-
-G, C1, C2, opt_g, opt_c, \
-param_lr_g, param_lr_c = get_models(inputs)
-ndata = target_folder.__len__()
+class ValueClipper:
+    def __init__(self, max_val): self.max_val = max_val
+    def clip(self, sample): return sample[0], min(sample[1], self.max_val)
 
 def _get_domain_name(filepath):
     filepath = Path(filepath)
     parts = filepath.name[:-len(filepath.suffix)].split('_')
     assert len(parts) == 3, f"can't process filename {filepath}"
     return parts[1]
-
 
 def _get_run_name(source, target):
     source, target = _get_domain_name(source), _get_domain_name(target)
@@ -109,7 +39,7 @@ def next_safe(itr, dl):
         batch = next(itr)
     return batch, itr
 
-def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entropy=False, thr=None):
+def test(step, dataset_test, n_share, G, Cs, open_class = None, is_open=False, entropy=False, thr=None):
     G.eval()
     for c in Cs:
         c.eval()
@@ -151,7 +81,7 @@ def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entr
                 per_class_correct[i] += float(len(correct_ind[0]))
                 per_class_num[i] += float(len(t_ind[0]))
             size += k
-            if open:
+            if is_open:
                 label_t = label_t.data.cpu().numpy()
                 if batch_idx == 0:
                     label_all = label_t
@@ -173,8 +103,47 @@ def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entr
     return acc_all, h_score
 
 
+def train(args):
+    config_file = args.config
+    with open(config_file, 'r') as f:
+        conf = yaml.load(f)
+    if args.steps is not None:
+        conf['train']['min_step'] = args.steps
+    conf = easydict.EasyDict(conf)
+    gpu_devices = ','.join([str(id) for id in args.gpu_devices])
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
+    # os.environ["WANDB_MODE"] = "offline"
+    args.cuda = torch.cuda.is_available()
 
-def train():
+    source_data = args.source_data
+    target_data = args.target_data
+    evaluation_data = args.target_data
+    network = args.network
+    use_gpu = torch.cuda.is_available()
+    n_share = conf.data.dataset.n_share
+    n_source_private = conf.data.dataset.n_source_private
+    n_total = conf.data.dataset.n_total
+    is_open = n_total - n_share - n_source_private > 0
+    num_class = n_share + n_source_private
+    script_name = os.path.basename(__file__)
+
+    inputs = vars(args)
+    inputs["evaluation_data"] = evaluation_data
+    inputs["conf"] = conf
+    inputs["script_name"] = script_name
+    inputs["num_class"] = num_class
+    inputs["config_file"] = config_file
+
+    source_loader, target_loader, \
+    test_loader, target_folder = get_dataloaders(inputs)
+
+    logname = log_set(inputs)
+
+    G, C1, C2, opt_g, opt_c, \
+    param_lr_g, param_lr_c = get_models(inputs)
+    ndata = target_folder.__len__()
+
+
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
     src_iter = iter(source_loader)
@@ -184,7 +153,7 @@ def train():
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data},
-                        tags=['remove_dataparallel']
+                        tags=['move_code']
                         )
 
     for step in range(conf.train.min_step + 1):
@@ -240,7 +209,7 @@ def train():
             'loss/open_tgt': ent_open.item()
         })
         if step > 0 and step % conf.test.test_interval == 0:
-            acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], open=open)
+            acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], is_open=is_open)
             print("acc all %s h_score %s " % (acc_o, h_score))
             # G.train()
             # C1.train()
@@ -255,4 +224,22 @@ def train():
     run.finish()
 
 
-train()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Pytorch OVANet',
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--config', type=str, default='config.yaml',
+                        help='/path/to/config/file')
+
+    parser.add_argument('--source_data', type=str, help='path to source list')
+    parser.add_argument('--target_data', type=str, help='path to target list')
+    parser.add_argument('--log-interval', type=int, default=100, help='how many batches before logging training status')
+    parser.add_argument('--exp_name', type=str, default='office', help='/path/to/config/file')
+    parser.add_argument('--network', type=str, default='resnet50', help='network name')
+    parser.add_argument("--gpu_devices", type=int, nargs='+', default=None, help="")
+    parser.add_argument("--no_adapt", default=False, action='store_true')
+    parser.add_argument("--save_model", default=False, action='store_true')
+    parser.add_argument("--save_path", type=str, default="record/ova_model", help='/path/to/save/model')
+    parser.add_argument('--multi', type=float, default=0.1, help='weight factor for adaptation')
+    parser.add_argument('--steps', type=int, help='number of steps, overrides config train.min_step')
+    args = parser.parse_args()
+    train(args)
