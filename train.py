@@ -101,6 +101,14 @@ def _get_run_name(source, target):
     source, target = _get_domain_name(source), _get_domain_name(target)
     return f'{source} -> {target}'
 
+def next_safe(itr, dl):
+    try:
+        batch = next(itr)
+    except:
+        itr = iter(dl)
+        batch = next(itr)
+    return batch, itr
+
 def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entropy=False, thr=None):
     G.eval()
     for c in Cs:
@@ -169,37 +177,34 @@ def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entr
 def train():
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
-    data_iter_s = iter(source_loader)
-    data_iter_t = iter(target_loader)
-    len_train_source = len(source_loader)
-    len_train_target = len(target_loader)
+    src_iter = iter(source_loader)
+    tgt_iter = iter(target_loader)
+    # len_train_source = len(source_loader)
+    # len_train_target = len(target_loader)
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data},
-                        tags=['change_test']
+                        tags=['small_changes']
                         )
+
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
         C2.train()
-        if step % len_train_target == 0:
-            data_iter_t = iter(target_loader)
-        if step % len_train_source == 0:
-            data_iter_s = iter(source_loader)
-        data_t = next(data_iter_t)
-        data_s = next(data_iter_s)
+        data_t, tgt_iter = next_safe(tgt_iter, target_loader)
+        data_s, src_iter = next_safe(src_iter, source_loader)
         inv_lr_scheduler(param_lr_g, opt_g, step,
                          init_lr=conf.train.lr,
                          max_iter=conf.train.min_step)
         inv_lr_scheduler(param_lr_c, opt_c, step,
                          init_lr=conf.train.lr,
                          max_iter=conf.train.min_step)
-        img_s = data_s[0]
-        label_s = data_s[1]
-        img_t = data_t[0]
-        img_s, label_s = Variable(img_s.cuda()), \
-                         Variable(label_s.cuda())
-        img_t = Variable(img_t.cuda())
+        img_s = data_s[0].cuda()
+        label_s = data_s[1].cuda()
+        img_t = data_t[0].cuda()
+        # img_s, label_s = Variable(img_s.cuda()), \
+        #                  Variable(label_s.cuda())
+        # img_t = Variable(img_t.cuda())
         opt_g.zero_grad()
         opt_c.zero_grad()
         C2.module.weight_norm()
@@ -250,8 +255,7 @@ def train():
             'loss/open_tgt': ent_open.item()
         })
         if step > 0 and step % conf.test.test_interval == 0:
-            acc_o, h_score = test(step, test_loader, logname, n_share, G,
-                                  [C1, C2], open=open)
+            acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], open=open)
             print("acc all %s h_score %s " % (acc_o, h_score))
             G.train()
             C1.train()
