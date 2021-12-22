@@ -11,6 +11,9 @@ from utils.loss import ova_loss, open_entropy
 from utils.lr_schedule import inv_lr_scheduler
 from utils.defaults import get_models, get_dataloaders
 from data_handling import api
+import torchvision.transforms as TF
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from collections import Counter
 import numpy as np
 # from eval import test
 import argparse
@@ -38,6 +41,12 @@ def next_safe(itr, dl):
         itr = iter(dl)
         batch = next(itr)
     return batch, itr
+
+def get_domain(domain_name):
+    for el in api.Domain:
+        if el.value == domain_name:
+            return el
+    raise Exception(f'Failed to create domain {domain_name}')
 
 def test(step, dataset_test, n_share, G, Cs, open_class = None, is_open=False, entropy=False, thr=None):
     G.eval()
@@ -102,6 +111,35 @@ def test(step, dataset_test, n_share, G, Cs, open_class = None, is_open=False, e
     h_score = 2 * known_acc * unknown / (known_acc + unknown)
     return acc_all, h_score
 
+def create_dataloaders(source:api.Domain, target:api.Domain, batch_size:int):
+    source = get_domain(source)
+    target = get_domain(target)
+
+    src_filelist = api.get_UDA_filelist(source)
+    src_filelist = list(filter(lambda x: x[1] < 15, src_filelist))
+    tgt_filelist = api.get_UDA_filelist(target)
+    tgt_filelist = list(filter(lambda x: ((x[1] < 10) or (x[1] >= 15)), tgt_filelist))
+    value_clipper = ValueClipper(15)
+    tgt_filelist = list(map(value_clipper.clip, tgt_filelist))
+
+    trn_tfm = TF.Compose([TF.Resize((256,256)), TF.RandomHorizontalFlip(), TF.RandomCrop(224)])
+    eval_tfm = TF.Compose([TF.Resize((256,256)), TF.CenterCrop(224)])
+    src_ds = api.FilelistDataset(src_filelist, mode=api.ImageMode.Tensor, tfm=trn_tfm, prefix=api._prefix)
+    tgt_ds = api.FilelistDataset(tgt_filelist, mode=api.ImageMode.Tensor, tfm=trn_tfm, prefix=api._prefix)
+    eval_ds = api.FilelistDataset(tgt_filelist, mode=api.ImageMode.Tensor, tfm=eval_tfm, prefix=api._prefix)
+
+    src_labels = [_[1] for _ in src_ds.samples]
+    freq2 = Counter(src_labels)
+
+    class_weight = {x: 1.0 / freq2[x] for x in freq2}
+    source_weights = [class_weight[x] for x in src_labels]
+    sampler = WeightedRandomSampler(source_weights, len(src_labels))
+    print("use balanced loader")
+    src_dl = DataLoader(src_ds, batch_size=batch_size, sampler=sampler, drop_last=True)
+
+    tgt_dl = DataLoader(tgt_ds, batch_size=batch_size, shuffle=True, drop_last=True)
+    eval_dl = DataLoader(eval_ds, batch_size=batch_size, shuffle=False)
+    return src_dl, tgt_dl, eval_dl
 
 def train(args):
     config_file = args.config
@@ -115,7 +153,6 @@ def train(args):
     # os.environ["WANDB_MODE"] = "offline"
     args.cuda = torch.cuda.is_available()
 
-    evaluation_data = args.target_data
     n_share = conf.data.dataset.n_share
     n_source_private = conf.data.dataset.n_source_private
     n_total = conf.data.dataset.n_total
@@ -124,17 +161,19 @@ def train(args):
     script_name = os.path.basename(__file__)
 
     inputs = vars(args)
-    inputs["evaluation_data"] = evaluation_data
     inputs["conf"] = conf
     inputs["script_name"] = script_name
     inputs["num_class"] = num_class
     inputs["config_file"] = config_file
 
-    source_loader, target_loader, \
-    test_loader, target_folder = get_dataloaders(inputs)
+    source_loader, target_loader, test_loader = create_dataloaders(args.source, args.target, conf.data.dataloader.batch_size)
+    inputs["evaluation_data"] = args.target_data
+    source_loader2, target_loader2, test_loader2, target_folder = get_dataloaders(inputs)
 
     G, C1, C2, opt_g, opt_c, \
     param_lr_g, param_lr_c = get_models(inputs)
+
+    
 
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
@@ -224,6 +263,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--source_data', type=str, help='path to source list')
     parser.add_argument('--target_data', type=str, help='path to target list')
+    parser.add_argument('--source', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
+    parser.add_argument('--target', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument('--log-interval', type=int, default=100, help='how many batches before logging training status')
     parser.add_argument('--exp_name', type=str, default='office', help='/path/to/config/file')
     parser.add_argument("--gpu_devices", type=int, nargs='+', default=None, help="")
