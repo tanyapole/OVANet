@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from apex import amp, optimizers
-from utils.utils import log_set, save_model
+from utils.utils import save_model
 from utils.loss import ova_loss, open_entropy
 from utils.lr_schedule import inv_lr_scheduler
 from utils.defaults import get_models, get_dataloaders
@@ -115,11 +115,7 @@ def train(args):
     # os.environ["WANDB_MODE"] = "offline"
     args.cuda = torch.cuda.is_available()
 
-    source_data = args.source_data
-    target_data = args.target_data
     evaluation_data = args.target_data
-    network = args.network
-    use_gpu = torch.cuda.is_available()
     n_share = conf.data.dataset.n_share
     n_source_private = conf.data.dataset.n_source_private
     n_total = conf.data.dataset.n_total
@@ -137,12 +133,8 @@ def train(args):
     source_loader, target_loader, \
     test_loader, target_folder = get_dataloaders(inputs)
 
-    logname = log_set(inputs)
-
     G, C1, C2, opt_g, opt_c, \
     param_lr_g, param_lr_c = get_models(inputs)
-    ndata = target_folder.__len__()
-
 
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
@@ -234,7 +226,6 @@ if __name__ == '__main__':
     parser.add_argument('--target_data', type=str, help='path to target list')
     parser.add_argument('--log-interval', type=int, default=100, help='how many batches before logging training status')
     parser.add_argument('--exp_name', type=str, default='office', help='/path/to/config/file')
-    parser.add_argument('--network', type=str, default='resnet50', help='network name')
     parser.add_argument("--gpu_devices", type=int, nargs='+', default=None, help="")
     parser.add_argument("--no_adapt", default=False, action='store_true')
     parser.add_argument("--save_model", default=False, action='store_true')
