@@ -108,7 +108,7 @@ def train():
     data_iter_t = iter(target_loader)
     len_train_source = len(source_loader)
     len_train_target = len(target_loader)
-    run = wandb.init(project='original-OVANet', 
+    run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data})
     for step in range(conf.train.min_step + 1):
