@@ -184,7 +184,7 @@ def train():
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data},
-                        tags=['small_changes']
+                        tags=['remove_dataparallel']
                         )
 
     for step in range(conf.train.min_step + 1):
@@ -207,7 +207,7 @@ def train():
         # img_t = Variable(img_t.cuda())
         opt_g.zero_grad()
         opt_c.zero_grad()
-        C2.module.weight_norm()
+        C2.weight_norm()
 
         ## Source loss calculation
         feat = G(img_s)

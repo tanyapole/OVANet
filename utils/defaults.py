@@ -113,9 +113,6 @@ def get_models(kwargs):
     [G, C1, C2], [opt_g, opt_c] = amp.initialize([G, C1, C2],
                                                   [opt_g, opt_c],
                                                   opt_level="O1")
-    G = nn.DataParallel(G)
-    C1 = nn.DataParallel(C1)
-    C2 = nn.DataParallel(C2)
 
     param_lr_g = []
     for param_group in opt_g.param_groups:
