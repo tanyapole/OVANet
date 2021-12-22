@@ -12,7 +12,7 @@ model:
   base_model: resnet50
   temp: 0.05
 train:
-  min_step: 10000 # minimum steps to run. run epochs until it exceeds the minStep
+  min_step: 5000 # minimum steps to run. run epochs until it exceeds the minStep
   lr: 0.01 # learning rate for new layers. learning rate for finetune is 1/10 of lr
   multi: 0.1
   weight_decay: 0.0005

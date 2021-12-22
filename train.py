@@ -11,7 +11,8 @@ from utils.utils import log_set, save_model
 from utils.loss import ova_loss, open_entropy
 from utils.lr_schedule import inv_lr_scheduler
 from utils.defaults import get_dataloaders, get_models
-from eval import test
+import numpy as np
+# from eval import test
 import argparse
 import wandb
 from pathlib import Path
@@ -100,6 +101,69 @@ def _get_run_name(source, target):
     source, target = _get_domain_name(source), _get_domain_name(target)
     return f'{source} -> {target}'
 
+def test(step, dataset_test, n_share, G, Cs, open_class = None, open=False, entropy=False, thr=None):
+    G.eval()
+    for c in Cs:
+        c.eval()
+    ## Known Score Calculation.
+    correct = 0
+    correct_close = 0
+    size = 0
+    per_class_num = np.zeros((n_share + 1))
+    per_class_correct = np.zeros((n_share + 1)).astype(np.float32)
+    class_list = [i for i in range(n_share)]
+    for batch_idx, data in enumerate(dataset_test):
+        with torch.no_grad():
+            img_t, label_t = data[0].cuda(), data[1].cuda()
+            feat = G(img_t).squeeze(-1).squeeze(-1)
+            out_t = Cs[0](feat)
+            if batch_idx == 0:
+                open_class = int(out_t.size(1))
+                class_list.append(open_class)
+            pred = out_t.data.max(1)[1]
+            correct_close += pred.eq(label_t.data).cpu().sum()
+            out_t = F.softmax(out_t)
+            entr = -torch.sum(out_t * torch.log(out_t), 1).data.cpu().numpy()
+            if entropy:
+                pred_unk = -torch.sum(out_t * torch.log(out_t), 1)
+                ind_unk = np.where(entr > thr)[0]
+            else:
+                out_open = Cs[1](feat)
+                out_open = F.softmax(out_open.view(out_t.size(0), 2, -1),1)
+                tmp_range = torch.range(0, out_t.size(0)-1).long().cuda()
+                pred_unk = out_open[tmp_range, 0, pred]
+                ind_unk = np.where(pred_unk.data.cpu().numpy() > 0.5)[0]
+            pred[ind_unk] = open_class
+            correct += pred.eq(label_t.data).cpu().sum()
+            pred = pred.cpu().numpy()
+            k = label_t.data.size()[0]
+            for i, t in enumerate(class_list):
+                t_ind = np.where(label_t.data.cpu().numpy() == t)
+                correct_ind = np.where(pred[t_ind[0]] == t)
+                per_class_correct[i] += float(len(correct_ind[0]))
+                per_class_num[i] += float(len(t_ind[0]))
+            size += k
+            if open:
+                label_t = label_t.data.cpu().numpy()
+                if batch_idx == 0:
+                    label_all = label_t
+                    pred_open = pred_unk.data.cpu().numpy()
+                    pred_all = out_t.data.cpu().numpy()
+                    pred_ent = entr
+                else:
+                    pred_open = np.r_[pred_open, pred_unk.data.cpu().numpy()]
+                    pred_ent = np.r_[pred_ent, entr]
+                    pred_all = np.r_[pred_all, out_t.data.cpu().numpy()]
+                    label_all = np.r_[label_all, label_t]
+    per_class_acc = per_class_correct / per_class_num
+    acc_all = 100. * float(correct) / float(size)
+    close_count = float(per_class_num[:len(class_list) - 1].sum())
+    acc_close_all = 100. *float(correct_close) / close_count
+    known_acc = per_class_acc[:open_class - 1].mean()
+    unknown = per_class_acc[-1]
+    h_score = 2 * known_acc * unknown / (known_acc + unknown)
+    return acc_all, h_score
+
 
 
 def train():
@@ -112,7 +176,7 @@ def train():
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data},
-                        tags=['change_model']
+                        tags=['change_test']
                         )
     for step in range(conf.train.min_step + 1):
         G.train()
