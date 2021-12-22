@@ -209,43 +209,28 @@ def train():
         opt_c.zero_grad()
         C2.weight_norm()
 
-        ## Source loss calculation
+        ## Source
         feat = G(img_s)
         out_s = C1(feat)
         out_open = C2(feat)
-        ## source classification loss
         loss_s = criterion(out_s, label_s)
-        ## open set loss for source
         out_open = out_open.view(out_s.size(0), 2, -1)
         open_loss_pos, open_loss_neg = ova_loss(out_open, label_s)
-        ## b x 2 x C
         loss_open = 0.5 * (open_loss_pos + open_loss_neg)
-        ## open set loss for target
         all = loss_s + loss_open
-        log_string = 'Train {}/{} \t ' \
-                     'Loss Source: {:.4f} ' \
-                     'Loss Open: {:.4f} ' \
-                     'Loss Open Source Positive: {:.4f} ' \
-                     'Loss Open Source Negative: {:.4f} '
-        log_values = [step, conf.train.min_step,
-                      loss_s.item(),  loss_open.item(),
-                      open_loss_pos.item(), open_loss_neg.item()]
-        if not args.no_adapt:
-            feat_t = G(img_t)
-            out_open_t = C2(feat_t)
-            out_open_t = out_open_t.view(img_t.size(0), 2, -1)
-            ent_open = open_entropy(out_open_t)
-            all += args.multi * ent_open
-            log_values.append(ent_open.item())
-            log_string += "Loss Open Target: {:.6f}"
+        # target
+        feat_t = G(img_t)
+        out_open_t = C2(feat_t)
+        out_open_t = out_open_t.view(img_t.size(0), 2, -1)
+        ent_open = open_entropy(out_open_t)
+        all += args.multi * ent_open
+        # optimization
         with amp.scale_loss(all, [opt_g, opt_c]) as scaled_loss:
             scaled_loss.backward()
         opt_g.step()
         opt_c.step()
         opt_g.zero_grad()
         opt_c.zero_grad()
-        if step % conf.train.log_interval == 0:
-            print(log_string.format(*log_values))
         run.log({
             'step': step,
             'loss/src': loss_s.item(),
@@ -257,8 +242,8 @@ def train():
         if step > 0 and step % conf.test.test_interval == 0:
             acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], open=open)
             print("acc all %s h_score %s " % (acc_o, h_score))
-            G.train()
-            C1.train()
+            # G.train()
+            # C1.train()
             if args.save_model:
                 save_path = "%s_%s.pth"%(args.save_path, step)
                 save_model(G, C1, C2, save_path)
