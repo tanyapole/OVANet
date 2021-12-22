@@ -4,8 +4,7 @@ import torchvision.transforms as transforms
 import torch.optim as optim
 from apex import amp, optimizers
 from data_loader.get_loader import get_loader, get_loader_label
-from .utils import get_model_mme
-from models.basenet import ResClassifier_MME
+from models.basenet import ResBase, ResClassifier_MME
 
 
 def get_dataloaders(kwargs):
@@ -86,33 +85,25 @@ def get_models(kwargs):
     net = kwargs["network"]
     num_class = kwargs["num_class"]
     conf = kwargs["conf"]
-    G, dim = get_model_mme(net, num_class=num_class)
+    dim = 2048
+    G = ResBase()
 
-    C2 = ResClassifier_MME(num_classes=2 * num_class,
-                           norm=False, input_size=dim)
-    C1 = ResClassifier_MME(num_classes=num_class,
-                           norm=False, input_size=dim)
+    C2 = ResClassifier_MME(num_classes=2 * num_class, norm=False, input_size=dim)
+    C1 = ResClassifier_MME(num_classes=num_class, norm=False, input_size=dim)
     device = torch.device("cuda")
     G.to(device)
     C1.to(device)
     C2.to(device)
 
     params = []
-    if net == "vgg16":
-        for key, value in dict(G.named_parameters()).items():
-            if 'classifier' in key:
-                params += [{'params': [value], 'lr': conf.train.multi,
-                            'weight_decay': conf.train.weight_decay}]
+    for key, value in dict(G.named_parameters()).items():
 
-    else:
-        for key, value in dict(G.named_parameters()).items():
-
-            if 'bias' in key:
-                params += [{'params': [value], 'lr': conf.train.multi,
-                            'weight_decay': conf.train.weight_decay}]
-            else:
-                params += [{'params': [value], 'lr': conf.train.multi,
-                            'weight_decay': conf.train.weight_decay}]
+        if 'bias' in key:
+            params += [{'params': [value], 'lr': conf.train.multi,
+                        'weight_decay': conf.train.weight_decay}]
+        else:
+            params += [{'params': [value], 'lr': conf.train.multi,
+                        'weight_decay': conf.train.weight_decay}]
     opt_g = optim.SGD(params, momentum=conf.train.sgd_momentum,
                       weight_decay=0.0005, nesterov=True)
     opt_c = optim.SGD(list(C1.parameters()) + list(C2.parameters()), lr=1.0,

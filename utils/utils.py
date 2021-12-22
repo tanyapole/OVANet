@@ -1,24 +1,7 @@
 from models.basenet import *
 import os
 import torch
-import socket
 
-
-def get_model_mme(net, num_class=13, temp=0.05, top=False, norm=True):
-    dim = 2048
-    if "resnet" in net:
-        model_g = ResBase(net, top=top)
-        if "resnet18" in net:
-            dim = 512
-        if net == "resnet34":
-            dim = 512
-    elif "vgg" in net:
-        model_g = VGGBase(option=net, pret=True, top=top)
-        dim = 4096
-    if top:
-        dim = 1000
-    print("selected network %s"%net)
-    return model_g, dim
 
 def log_set(kwargs):
     source_data = kwargs["source_data"]

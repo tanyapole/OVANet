@@ -58,6 +58,7 @@ if args.steps is not None:
 conf = easydict.EasyDict(conf)
 gpu_devices = ','.join([str(id) for id in args.gpu_devices])
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
+# os.environ["WANDB_MODE"] = "offline"
 args.cuda = torch.cuda.is_available()
 
 source_data = args.source_data
@@ -110,7 +111,9 @@ def train():
     len_train_target = len(target_loader)
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
-                        config={'source': args.source_data, 'target': args.target_data})
+                        config={'source': args.source_data, 'target': args.target_data},
+                        tags=['change_model']
+                        )
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
