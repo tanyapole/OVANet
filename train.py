@@ -167,13 +167,9 @@ def train(args):
     inputs["config_file"] = config_file
 
     source_loader, target_loader, test_loader = create_dataloaders(args.source, args.target, conf.data.dataloader.batch_size)
-    inputs["evaluation_data"] = args.target_data
-    source_loader2, target_loader2, test_loader2, target_folder = get_dataloaders(inputs)
 
     G, C1, C2, opt_g, opt_c, \
     param_lr_g, param_lr_c = get_models(inputs)
-
-    
 
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
@@ -184,7 +180,7 @@ def train(args):
     run = wandb.init(project='debug-ova', 
                         name='original ' + _get_run_name(args.source_data, args.target_data), 
                         config={'source': args.source_data, 'target': args.target_data},
-                        tags=['move_code']
+                        tags=['new_ds']
                         )
 
     for step in range(conf.train.min_step + 1):
@@ -261,8 +257,6 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='config.yaml',
                         help='/path/to/config/file')
 
-    parser.add_argument('--source_data', type=str, help='path to source list')
-    parser.add_argument('--target_data', type=str, help='path to target list')
     parser.add_argument('--source', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument('--target', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument('--log-interval', type=int, default=100, help='how many batches before logging training status')
