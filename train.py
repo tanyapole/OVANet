@@ -1,20 +1,15 @@
-import yaml
-import easydict
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
 import torch.optim as optim
-from apex import amp#, optimizers
-# from utils.loss import ova_loss, open_entropy
-# from utils.defaults import get_models, get_dataloaders
+from apex import amp
 from data_handling import api
 import torchvision.transforms as TF
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from collections import Counter
 import numpy as np
-# from eval import test
 import argparse
 import wandb
 
@@ -172,14 +167,6 @@ class ResClassifier_MME(nn.Module):
     def weights_init(self):
         self.fc.weight.data.normal_(0.0, 0.1)
 
-def save_model(model_g, model_c1, model_c2, save_path):
-    save_dic = {
-        'g_state_dict': model_g.state_dict(),
-        'c1_state_dict': model_c1.state_dict(),
-        'c2_state_dict': model_c2.state_dict(),
-    }
-    torch.save(save_dic, save_path)
-
 def inv_lr_scheduler(param_lr, optimizer, iter_num, gamma=10,
                      power=0.75, init_lr=0.001,weight_decay=0.0005,
                      max_iter=10000):
@@ -191,7 +178,6 @@ def inv_lr_scheduler(param_lr, optimizer, iter_num, gamma=10,
         param_group['lr'] = lr * param_lr[i]
         i+=1
     return lr
-
 
 def ova_loss(out_open, label):
     assert len(out_open.size()) == 3
@@ -216,31 +202,46 @@ def open_entropy(out_open):
     ent_open = torch.mean(torch.mean(torch.sum(-out_open * torch.log(out_open + 1e-8), 1), 1))
     return ent_open
 
-def train(args):
-    config_file = args.config
-    with open(config_file, 'r') as f:
-        conf = yaml.load(f)
+def create_empty_object(): return type('test', (), {})()
+
+def get_conf(args):
+    train = create_empty_object()
+    train.min_step = 10000 # minimum steps to run. run epochs until it exceeds the minStep
+    train.lr = 0.01 # learning rate for new layers. learning rate for finetune is 1/10 of lr
+    train.multi = 0.1
+    train.weight_decay = 0.0005
+    train.sgd_momentum = 0.9
+    train.momentum = 0.0
+    train.eta = 0.05
+    train.log_interval = 100
+    train.thr = 1.354025100551105
+    train.margin = 0.5
     if args.steps is not None:
-        conf['train']['min_step'] = args.steps
-    conf = easydict.EasyDict(conf)
+        train.min_step = args.steps
+    conf = create_empty_object()
+    conf.train = train
+    return conf
+
+def train(args):
+    conf = get_conf(args)
     gpu_devices = ','.join([str(id) for id in args.gpu_devices])
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
     # os.environ["WANDB_MODE"] = "offline"
     args.cuda = torch.cuda.is_available()
 
-    n_share = conf.data.dataset.n_share
-    n_source_private = conf.data.dataset.n_source_private
-    n_total = conf.data.dataset.n_total
-    is_open = n_total - n_share - n_source_private > 0
-    num_class = n_share + n_source_private
+    num_class_common = 10
+    num_class_src_priv = 5
+    num_class_src = num_class_common + num_class_src_priv
+    num_class_total = 65
+    is_open = num_class_total - num_class_src > 0
 
     # data
-    source_loader, target_loader, test_loader = create_dataloaders(args.source, args.target, conf.data.dataloader.batch_size)
+    src_dl, tgt_dl, eval_dl = create_dataloaders(args.source, args.target, batch_size=36)
 
     # models
     G = ResBase().cuda().eval()
-    C1 = ResClassifier_MME(num_classes=num_class, norm=False, input_size=2048).cuda().eval()
-    C2 = ResClassifier_MME(num_classes=2 * num_class, norm=False, input_size=2048).cuda().eval()
+    C1 = ResClassifier_MME(num_classes=num_class_src, norm=False, input_size=2048).cuda().eval()
+    C2 = ResClassifier_MME(num_classes=2 * num_class_src, norm=False, input_size=2048).cuda().eval()
 
     params = [{'params': [p], 'lr': conf.train.multi, 'weight_decay': conf.train.weight_decay} for (n,p) in G.named_parameters()]
     opt_g = optim.SGD(params, momentum=conf.train.sgd_momentum, weight_decay=0.0005, nesterov=True)
@@ -253,46 +254,43 @@ def train(args):
     # training
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
-    src_iter = iter(source_loader)
-    tgt_iter = iter(target_loader)
+    src_iter = iter(src_dl)
+    tgt_iter = iter(tgt_dl)
     run = wandb.init(project='debug-ova', 
                         name=f'original {args.source}->{args.target}', 
                         config={'source': args.source, 'target': args.target}, 
-                        tags=['more_changes'])
+                        tags=['more_refactoring'])
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
         C2.train()
-        data_t, tgt_iter = next_safe(tgt_iter, target_loader)
-        data_s, src_iter = next_safe(src_iter, source_loader)
+        (img_s, lbl_s, _), src_iter = next_safe(src_iter, src_dl)
+        (img_t, _, _), tgt_iter = next_safe(tgt_iter, tgt_dl)
         inv_lr_scheduler(param_lr_g, opt_g, step,
                          init_lr=conf.train.lr,
                          max_iter=conf.train.min_step)
         inv_lr_scheduler(param_lr_c, opt_c, step,
                          init_lr=conf.train.lr,
                          max_iter=conf.train.min_step)
-        img_s = data_s[0].cuda()
-        label_s = data_s[1].cuda()
-        img_t = data_t[0].cuda()
         opt_g.zero_grad()
         opt_c.zero_grad()
         C2.weight_norm()
 
         ## Source
-        feat = G(img_s)
+        feat = G(img_s.cuda())
         out_s = C1(feat)
         out_open = C2(feat)
-        loss_s = criterion(out_s, label_s)
+        loss_s = criterion(out_s, lbl_s.cuda())
         out_open = out_open.view(out_s.size(0), 2, -1)
-        open_loss_pos, open_loss_neg = ova_loss(out_open, label_s)
+        open_loss_pos, open_loss_neg = ova_loss(out_open, lbl_s.cuda())
         loss_open = 0.5 * (open_loss_pos + open_loss_neg)
         all = loss_s + loss_open
         # target
-        feat_t = G(img_t)
+        feat_t = G(img_t.cuda())
         out_open_t = C2(feat_t)
         out_open_t = out_open_t.view(img_t.size(0), 2, -1)
         ent_open = open_entropy(out_open_t)
-        all += args.multi * ent_open
+        all += args.tgt_loss_coef * ent_open
         # optimization
         with amp.scale_loss(all, [opt_g, opt_c]) as scaled_loss:
             scaled_loss.backward()
@@ -308,35 +306,21 @@ def train(args):
             'loss/open_src_neg': open_loss_neg.item(),
             'loss/open_tgt': ent_open.item()
         })
-        if step > 0 and step % conf.test.test_interval == 0:
-            acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], is_open=is_open)
+        if step > 0 and step % 200 == 0:
+            acc_o, h_score = test(step, eval_dl, num_class_common, G, [C1, C2], is_open=is_open)
             print(f"acc all {acc_o} h_score {h_score}")
-            if args.save_model:
-                save_path = f"{args.save_path}_{step}.pth"
-                save_model(G, C1, C2, save_path)
-            run.log({
-                'step': step,
-                'acc': acc_o,
-                'h_score': h_score
-            })
+            run.log({'step': step, 'acc': acc_o, 'h_score': h_score})
     run.finish()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pytorch OVANet',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--config', type=str, default='config.yaml',
-                        help='/path/to/config/file')
-
+    parser.add_argument('--config', type=str, default='config.yaml', help='/path/to/config/file')
     parser.add_argument('--source', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument('--target', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
-    parser.add_argument('--log-interval', type=int, default=100, help='how many batches before logging training status')
-    parser.add_argument('--exp_name', type=str, default='office', help='/path/to/config/file')
     parser.add_argument("--gpu_devices", type=int, nargs='+', default=None, help="")
-    parser.add_argument("--no_adapt", default=False, action='store_true')
-    parser.add_argument("--save_model", default=False, action='store_true')
-    parser.add_argument("--save_path", type=str, default="record/ova_model", help='/path/to/save/model')
-    parser.add_argument('--multi', type=float, default=0.1, help='weight factor for adaptation')
+    parser.add_argument('--tgt_loss_coef', type=float, default=0.1, help='weight factor for adaptation')
     parser.add_argument('--steps', type=int, help='number of steps, overrides config train.min_step')
     args = parser.parse_args()
     train(args)
