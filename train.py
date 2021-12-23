@@ -3,13 +3,13 @@ import yaml
 import easydict
 import os
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import models
 from apex import amp, optimizers
-from utils.utils import save_model
 from utils.loss import ova_loss, open_entropy
 from utils.lr_schedule import inv_lr_scheduler
-from utils.defaults import get_models, get_dataloaders
+# from utils.defaults import get_models, get_dataloaders
 from data_handling import api
 import torchvision.transforms as TF
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -18,21 +18,14 @@ import numpy as np
 # from eval import test
 import argparse
 import wandb
-from pathlib import Path
+import torch
+from torch import nn
+import torch.optim as optim
+from apex import amp, optimizers
 
 class ValueClipper:
     def __init__(self, max_val): self.max_val = max_val
     def clip(self, sample): return sample[0], min(sample[1], self.max_val)
-
-def _get_domain_name(filepath):
-    filepath = Path(filepath)
-    parts = filepath.name[:-len(filepath.suffix)].split('_')
-    assert len(parts) == 3, f"can't process filename {filepath}"
-    return parts[1]
-
-def _get_run_name(source, target):
-    source, target = _get_domain_name(source), _get_domain_name(target)
-    return f'{source} -> {target}'
 
 def next_safe(itr, dl):
     try:
@@ -141,6 +134,98 @@ def create_dataloaders(source:api.Domain, target:api.Domain, batch_size:int):
     eval_dl = DataLoader(eval_ds, batch_size=batch_size, shuffle=False)
     return src_dl, tgt_dl, eval_dl
 
+class ResBase(nn.Module):
+    def __init__(self):
+        super(ResBase, self).__init__()
+        self.dim = 2048
+        model_ft = models.resnet50(pretrained=True)
+        self.features = nn.Sequential(*(list(model_ft.children())[:-1]))           
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), self.dim)
+        return x
+
+
+class ResClassifier_MME(nn.Module):
+    def __init__(self, num_classes=12, input_size=2048, temp=0.05, norm=True):
+        super(ResClassifier_MME, self).__init__()
+        if norm:
+            self.fc = nn.Linear(input_size, num_classes, bias=False)
+        else:
+            self.fc = nn.Linear(input_size, num_classes, bias=False)
+        self.norm = norm
+        self.tmp = temp
+
+    def set_lambda(self, lambd):
+        self.lambd = lambd
+
+    def forward(self, x, dropout=False, return_feat=False):
+        if return_feat:
+            return x
+        if self.norm:
+            x = F.normalize(x)
+            x = self.fc(x)/self.tmp
+        else:
+            x = self.fc(x)
+        return x
+
+    def weight_norm(self):
+        w = self.fc.weight.data
+        norm = w.norm(p=2, dim=1, keepdim=True)
+        self.fc.weight.data = w.div(norm.expand_as(w))
+    def weights_init(self):
+        self.fc.weight.data.normal_(0.0, 0.1)
+
+def get_models(kwargs):
+    num_class = kwargs["num_class"]
+    conf = kwargs["conf"]
+    dim = 2048
+    G = ResBase()
+
+    C2 = ResClassifier_MME(num_classes=2 * num_class, norm=False, input_size=dim)
+    C1 = ResClassifier_MME(num_classes=num_class, norm=False, input_size=dim)
+    device = torch.device("cuda")
+    G.to(device)
+    C1.to(device)
+    C2.to(device)
+
+    params = []
+    for key, value in dict(G.named_parameters()).items():
+
+        if 'bias' in key:
+            params += [{'params': [value], 'lr': conf.train.multi,
+                        'weight_decay': conf.train.weight_decay}]
+        else:
+            params += [{'params': [value], 'lr': conf.train.multi,
+                        'weight_decay': conf.train.weight_decay}]
+    opt_g = optim.SGD(params, momentum=conf.train.sgd_momentum,
+                      weight_decay=0.0005, nesterov=True)
+    opt_c = optim.SGD(list(C1.parameters()) + list(C2.parameters()), lr=1.0,
+                       momentum=conf.train.sgd_momentum, weight_decay=0.0005,
+                       nesterov=True)
+
+    [G, C1, C2], [opt_g, opt_c] = amp.initialize([G, C1, C2],
+                                                  [opt_g, opt_c],
+                                                  opt_level="O1")
+
+    param_lr_g = []
+    for param_group in opt_g.param_groups:
+        param_lr_g.append(param_group["lr"])
+    param_lr_c = []
+    for param_group in opt_c.param_groups:
+        param_lr_c.append(param_group["lr"])
+
+    return G, C1, C2, opt_g, opt_c, param_lr_g, param_lr_c
+
+def save_model(model_g, model_c1, model_c2, save_path):
+    save_dic = {
+        'g_state_dict': model_g.state_dict(),
+        'c1_state_dict': model_c1.state_dict(),
+        'c2_state_dict': model_c2.state_dict(),
+    }
+    torch.save(save_dic, save_path)
+
 def train(args):
     config_file = args.config
     with open(config_file, 'r') as f:
@@ -168,8 +253,7 @@ def train(args):
 
     source_loader, target_loader, test_loader = create_dataloaders(args.source, args.target, conf.data.dataloader.batch_size)
 
-    G, C1, C2, opt_g, opt_c, \
-    param_lr_g, param_lr_c = get_models(inputs)
+    G, C1, C2, opt_g, opt_c, param_lr_g, param_lr_c = get_models(inputs)
 
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
@@ -178,8 +262,8 @@ def train(args):
     # len_train_source = len(source_loader)
     # len_train_target = len(target_loader)
     run = wandb.init(project='debug-ova', 
-                        name='original ' + _get_run_name(args.source_data, args.target_data), 
-                        config={'source': args.source_data, 'target': args.target_data},
+                        name=f'original {args.source}->{args.target}', 
+                        config={'source': args.source, 'target': args.target},
                         tags=['new_ds']
                         )
 

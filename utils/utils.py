@@ -1,4 +1,3 @@
-from models.basenet import *
 import os
 import torch
 
@@ -31,13 +30,7 @@ def log_set(kwargs):
     return logname
 
 
-def save_model(model_g, model_c1, model_c2, save_path):
-    save_dic = {
-        'g_state_dict': model_g.state_dict(),
-        'c1_state_dict': model_c1.state_dict(),
-        'c2_state_dict': model_c2.state_dict(),
-    }
-    torch.save(save_dic, save_path)
+
 
 def load_model(model_g, model_c, load_path):
     checkpoint = torch.load(load_path)
