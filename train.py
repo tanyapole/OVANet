@@ -1,4 +1,3 @@
-from __future__ import print_function
 import yaml
 import easydict
 import os
@@ -307,7 +306,7 @@ def train(args):
     run = wandb.init(project='debug-ova', 
                         name=f'original {args.source}->{args.target}', 
                         config={'source': args.source, 'target': args.target},
-                        tags=['new_ds']
+                        tags=['move_code']
                         )
 
     for step in range(conf.train.min_step + 1):
@@ -364,11 +363,11 @@ def train(args):
         })
         if step > 0 and step % conf.test.test_interval == 0:
             acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], is_open=is_open)
-            print("acc all %s h_score %s " % (acc_o, h_score))
+            print(f"acc all {acc_o} h_score {h_score}")
             # G.train()
             # C1.train()
             if args.save_model:
-                save_path = "%s_%s.pth"%(args.save_path, step)
+                save_path = f"{args.save_path}_{step}.pth"
                 save_model(G, C1, C2, save_path)
             run.log({
                 'step': step,
