@@ -316,7 +316,6 @@ def train(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Pytorch OVANet',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--config', type=str, default='config.yaml', help='/path/to/config/file')
     parser.add_argument('--source', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument('--target', choices=['art', 'clipart', 'product', 'real_world'], help='source domain')
     parser.add_argument("--gpu_devices", type=int, nargs='+', default=None, help="")
