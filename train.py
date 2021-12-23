@@ -172,47 +172,6 @@ class ResClassifier_MME(nn.Module):
     def weights_init(self):
         self.fc.weight.data.normal_(0.0, 0.1)
 
-def get_models(kwargs):
-    num_class = kwargs["num_class"]
-    conf = kwargs["conf"]
-    dim = 2048
-    G = ResBase()
-
-    C2 = ResClassifier_MME(num_classes=2 * num_class, norm=False, input_size=dim)
-    C1 = ResClassifier_MME(num_classes=num_class, norm=False, input_size=dim)
-    device = torch.device("cuda")
-    G.to(device)
-    C1.to(device)
-    C2.to(device)
-
-    params = []
-    for key, value in dict(G.named_parameters()).items():
-
-        if 'bias' in key:
-            params += [{'params': [value], 'lr': conf.train.multi,
-                        'weight_decay': conf.train.weight_decay}]
-        else:
-            params += [{'params': [value], 'lr': conf.train.multi,
-                        'weight_decay': conf.train.weight_decay}]
-    opt_g = optim.SGD(params, momentum=conf.train.sgd_momentum,
-                      weight_decay=0.0005, nesterov=True)
-    opt_c = optim.SGD(list(C1.parameters()) + list(C2.parameters()), lr=1.0,
-                       momentum=conf.train.sgd_momentum, weight_decay=0.0005,
-                       nesterov=True)
-
-    [G, C1, C2], [opt_g, opt_c] = amp.initialize([G, C1, C2],
-                                                  [opt_g, opt_c],
-                                                  opt_level="O1")
-
-    param_lr_g = []
-    for param_group in opt_g.param_groups:
-        param_lr_g.append(param_group["lr"])
-    param_lr_c = []
-    for param_group in opt_c.param_groups:
-        param_lr_c.append(param_group["lr"])
-
-    return G, C1, C2, opt_g, opt_c, param_lr_g, param_lr_c
-
 def save_model(model_g, model_c1, model_c2, save_path):
     save_dic = {
         'g_state_dict': model_g.state_dict(),
@@ -224,9 +183,7 @@ def save_model(model_g, model_c1, model_c2, save_path):
 def inv_lr_scheduler(param_lr, optimizer, iter_num, gamma=10,
                      power=0.75, init_lr=0.001,weight_decay=0.0005,
                      max_iter=10000):
-    #10000
     """Decay learning rate by a factor of 0.1 every lr_decay_epoch epochs."""
-    #max_iter = 10000
     gamma = 10.0
     lr = init_lr * (1 + gamma * min(1.0, iter_num / max_iter)) ** (-power)
     i=0
@@ -234,15 +191,6 @@ def inv_lr_scheduler(param_lr, optimizer, iter_num, gamma=10,
         param_group['lr'] = lr * param_lr[i]
         i+=1
     return lr
-
-def entropy(p, prob=True, mean=True):
-    if prob:
-        p = F.softmax(p)
-    en = -torch.sum(p * torch.log(p+1e-5), 1)
-    if mean:
-        return torch.mean(en)
-    else:
-        return en
 
 
 def ova_loss(out_open, label):
@@ -285,30 +233,32 @@ def train(args):
     n_total = conf.data.dataset.n_total
     is_open = n_total - n_share - n_source_private > 0
     num_class = n_share + n_source_private
-    script_name = os.path.basename(__file__)
 
-    inputs = vars(args)
-    inputs["conf"] = conf
-    inputs["script_name"] = script_name
-    inputs["num_class"] = num_class
-    inputs["config_file"] = config_file
-
+    # data
     source_loader, target_loader, test_loader = create_dataloaders(args.source, args.target, conf.data.dataloader.batch_size)
 
-    G, C1, C2, opt_g, opt_c, param_lr_g, param_lr_c = get_models(inputs)
+    # models
+    G = ResBase().cuda().eval()
+    C1 = ResClassifier_MME(num_classes=num_class, norm=False, input_size=2048).cuda().eval()
+    C2 = ResClassifier_MME(num_classes=2 * num_class, norm=False, input_size=2048).cuda().eval()
 
+    params = [{'params': [p], 'lr': conf.train.multi, 'weight_decay': conf.train.weight_decay} for (n,p) in G.named_parameters()]
+    opt_g = optim.SGD(params, momentum=conf.train.sgd_momentum, weight_decay=0.0005, nesterov=True)
+    opt_c = optim.SGD(list(C1.parameters()) + list(C2.parameters()), lr=1.0, momentum=conf.train.sgd_momentum, weight_decay=0.0005, nesterov=True)
+    [G, C1, C2], [opt_g, opt_c] = amp.initialize([G, C1, C2], [opt_g, opt_c], opt_level="O1")
+
+    param_lr_g = [param_group["lr"] for param_group in opt_g.param_groups]
+    param_lr_c = [param_group["lr"] for param_group in opt_c.param_groups]
+
+    # training
     criterion = nn.CrossEntropyLoss().cuda()
     print('train start!')
     src_iter = iter(source_loader)
     tgt_iter = iter(target_loader)
-    # len_train_source = len(source_loader)
-    # len_train_target = len(target_loader)
     run = wandb.init(project='debug-ova', 
                         name=f'original {args.source}->{args.target}', 
-                        config={'source': args.source, 'target': args.target},
-                        tags=['move_code']
-                        )
-
+                        config={'source': args.source, 'target': args.target}, 
+                        tags=['more_changes'])
     for step in range(conf.train.min_step + 1):
         G.train()
         C1.train()
@@ -324,9 +274,6 @@ def train(args):
         img_s = data_s[0].cuda()
         label_s = data_s[1].cuda()
         img_t = data_t[0].cuda()
-        # img_s, label_s = Variable(img_s.cuda()), \
-        #                  Variable(label_s.cuda())
-        # img_t = Variable(img_t.cuda())
         opt_g.zero_grad()
         opt_c.zero_grad()
         C2.weight_norm()
@@ -364,8 +311,6 @@ def train(args):
         if step > 0 and step % conf.test.test_interval == 0:
             acc_o, h_score = test(step, test_loader, n_share, G, [C1, C2], is_open=is_open)
             print(f"acc all {acc_o} h_score {h_score}")
-            # G.train()
-            # C1.train()
             if args.save_model:
                 save_path = f"{args.save_path}_{step}.pth"
                 save_model(G, C1, C2, save_path)
