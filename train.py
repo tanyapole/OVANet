@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
-from apex import amp, optimizers
-from utils.loss import ova_loss, open_entropy
-from utils.lr_schedule import inv_lr_scheduler
+import torch.optim as optim
+from apex import amp#, optimizers
+# from utils.loss import ova_loss, open_entropy
 # from utils.defaults import get_models, get_dataloaders
 from data_handling import api
 import torchvision.transforms as TF
@@ -18,10 +18,7 @@ import numpy as np
 # from eval import test
 import argparse
 import wandb
-import torch
-from torch import nn
-import torch.optim as optim
-from apex import amp, optimizers
+
 
 class ValueClipper:
     def __init__(self, max_val): self.max_val = max_val
@@ -146,7 +143,6 @@ class ResBase(nn.Module):
         x = x.view(x.size(0), self.dim)
         return x
 
-
 class ResClassifier_MME(nn.Module):
     def __init__(self, num_classes=12, input_size=2048, temp=0.05, norm=True):
         super(ResClassifier_MME, self).__init__()
@@ -225,6 +221,53 @@ def save_model(model_g, model_c1, model_c2, save_path):
         'c2_state_dict': model_c2.state_dict(),
     }
     torch.save(save_dic, save_path)
+
+def inv_lr_scheduler(param_lr, optimizer, iter_num, gamma=10,
+                     power=0.75, init_lr=0.001,weight_decay=0.0005,
+                     max_iter=10000):
+    #10000
+    """Decay learning rate by a factor of 0.1 every lr_decay_epoch epochs."""
+    #max_iter = 10000
+    gamma = 10.0
+    lr = init_lr * (1 + gamma * min(1.0, iter_num / max_iter)) ** (-power)
+    i=0
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr * param_lr[i]
+        i+=1
+    return lr
+
+def entropy(p, prob=True, mean=True):
+    if prob:
+        p = F.softmax(p)
+    en = -torch.sum(p * torch.log(p+1e-5), 1)
+    if mean:
+        return torch.mean(en)
+    else:
+        return en
+
+
+def ova_loss(out_open, label):
+    assert len(out_open.size()) == 3
+    assert out_open.size(1) == 2
+
+    out_open = F.softmax(out_open, 1)
+    label_p = torch.zeros((out_open.size(0),
+                           out_open.size(2))).long().cuda()
+    label_range = torch.range(0, out_open.size(0) - 1).long()
+    label_p[label_range, label] = 1
+    label_n = 1 - label_p
+    open_loss_pos = torch.mean(torch.sum(-torch.log(out_open[:, 1, :]
+                                                    + 1e-8) * label_p, 1))
+    open_loss_neg = torch.mean(torch.max(-torch.log(out_open[:, 0, :] +
+                                                1e-8) * label_n, 1)[0])
+    return open_loss_pos, open_loss_neg
+
+def open_entropy(out_open):
+    assert len(out_open.size()) == 3
+    assert out_open.size(1) == 2
+    out_open = F.softmax(out_open, 1)
+    ent_open = torch.mean(torch.mean(torch.sum(-out_open * torch.log(out_open + 1e-8), 1), 1))
+    return ent_open
 
 def train(args):
     config_file = args.config
