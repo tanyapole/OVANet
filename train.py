@@ -90,7 +90,7 @@ def test(step, dataset_test, n_share, G, Cs, open_class = None, is_open=False, e
     acc_all = 100. * float(correct) / float(size)
     close_count = float(per_class_num[:len(class_list) - 1].sum())
     acc_close_all = 100. *float(correct_close) / close_count
-    known_acc = per_class_acc[:open_class - 1].mean()
+    known_acc = per_class_acc[:-1].mean()
     unknown = per_class_acc[-1]
     h_score = 2 * known_acc * unknown / (known_acc + unknown)
     return acc_all, h_score
